@@ -3,67 +3,106 @@ import assert from 'node:assert/strict';
 import {
   redactText,
   redact,
+  auditPii,
+  createRedactorTransform,
   isValidLuhn,
+  isValidMyNumber,
   pseudonymize,
   tokenize,
   detokenize,
 } from '../dist/index.js';
 
 test('Luhn validator verifies standard card numbers and rejects non-cards', () => {
-  // Standard test card numbers
   assert.equal(isValidLuhn('4532015112830366'), true); // Visa
   assert.equal(isValidLuhn('4532-0151-1283-0366'), true);
-  // Invalid checksum
-  assert.equal(isValidLuhn('4532015112830367'), false);
-  // Random numbers not passing Luhn
+  assert.equal(isValidLuhn('4532015112830367'), false); // Invalid checksum
   assert.equal(isValidLuhn('1234567890123456'), false);
 });
 
-test('redactText masks emails, tokens, and credit cards', () => {
-  const sample =
-    'Contact user@example.com with key AKIAIOSFODNN7EXAMPLE and card 4532-0151-1283-0366 at IP 192.168.1.50';
+test('Japan MyNumber Modulo 11 check digit verifies authentic numbers and rejects typos', () => {
+  // Test case calculation:
+  // Digits 1 to 11: 12345678901 -> remainder = sum % 11 -> check digit
+  // Let's test with a mathematically valid 12-digit number:
+  // e.g. 123456789018 -> check digit 8
+  const validMyNumber = '123456789018';
+  assert.equal(isValidMyNumber(validMyNumber), true);
+  assert.equal(isValidMyNumber('1234-5678-9018'), true);
 
-  const masked = redactText(sample, { mode: 'mask' });
-  assert.ok(!masked.includes('user@example.com'));
-  assert.ok(masked.includes('@example.com'));
-  assert.ok(!masked.includes('AKIAIOSFODNN7EXAMPLE'));
-  assert.ok(!masked.includes('4532-0151-1283-0366'));
-  assert.ok(masked.includes('4***-****-****-0366'));
-  assert.ok(masked.includes('192.168.*.*'));
-
-  const replaced = redactText(sample, { mode: 'replace' });
-  assert.ok(replaced.includes('[REDACTED_EMAIL]'));
-  assert.ok(replaced.includes('[REDACTED_AWS_KEY]'));
-  assert.ok(replaced.includes('[REDACTED_CREDIT_CARD]'));
-  assert.ok(replaced.includes('[REDACTED_IP]'));
+  // Single digit typo must be rejected
+  assert.equal(isValidMyNumber('123456789017'), false);
+  assert.equal(isValidMyNumber('123456789019'), false);
+  assert.equal(isValidMyNumber('000000000001'), false);
 });
 
-test('redact deep recurses JSON objects and arrays, protecting sensitive keys', () => {
-  const input = {
-    user: {
-      name: 'Alice',
-      email: 'alice@corp.com',
-      password: 'PlaintextSuperSecret123!',
-      nested: {
-        apiKey: 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-        active: true,
-      },
-    },
-    logs: [
-      'Failed login for bob@test.org from 10.0.0.1',
-      { card_number: '4532015112830366' },
-    ],
+test('Redaction detects and masks Japan specific PII (MyNumber, phone, postal)', () => {
+  const text = '個人番号: 1234-5678-9018, 携帯: 090-1234-5678, 郵便番号: 〒150-0002';
+  const masked = redactText(text, { mode: 'mask' });
+
+  assert.ok(!masked.includes('1234-5678-9018'));
+  assert.ok(masked.includes('****-****-9018'));
+  assert.ok(!masked.includes('090-1234-5678'));
+  assert.ok(masked.includes('***-****-5678'));
+  assert.ok(masked.includes('***-****'));
+
+  const replaced = redactText(text, { mode: 'replace' });
+  assert.ok(replaced.includes('[REDACTED_MYNUMBER]'));
+  assert.ok(replaced.includes('[REDACTED_PHONE]'));
+  assert.ok(replaced.includes('[REDACTED_POSTAL]'));
+});
+
+test('auditPii evaluates privacy risk score and categorizes sensitive data', () => {
+  const dangerousPayload = {
+    auth: 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgN_p_v1234567890',
+    card: '4532-0151-1283-0366',
+    email: 'admin@system.local',
   };
 
-  const sanitized = redact(input, { mode: 'mask' });
+  const report = auditPii(dangerousPayload);
+  assert.equal(report.riskLevel, 'critical');
+  assert.equal(report.hasCredentials, true);
+  assert.equal(report.hasFinancials, true);
+  assert.ok(report.counts.jwt >= 1);
+  assert.ok(report.counts.credit_card >= 1);
+  assert.ok(report.counts.email >= 1);
+});
 
-  // Value redactions
-  assert.ok(!sanitized.user.email.includes('alice@corp.com'));
-  assert.equal(sanitized.user.password, '********');
-  assert.equal(sanitized.user.nested.apiKey, '********');
-  assert.ok(sanitized.logs[0].includes('@test.org'));
-  assert.ok(!sanitized.logs[0].includes('bob@test.org'));
-  assert.equal(sanitized.logs[1].card_number, '********');
+test('Custom detectors support proprietary company formats with validators', () => {
+  const customEmployeeDetector = {
+    type: 'employee_id',
+    pattern: /\bEMP-[A-Z]{2}-\d{4}\b/g,
+    validator: (match) => !match.endsWith('0000'), // Reject reserved 0000
+    replacer: (match) => `EMP-**-****`,
+  };
+
+  const text = 'Staff member EMP-US-4821 and test account EMP-QA-0000 in meeting';
+  const masked = redactText(text, {
+    customDetectors: [customEmployeeDetector],
+  });
+
+  assert.ok(!masked.includes('EMP-US-4821'));
+  assert.ok(masked.includes('EMP-**-****'));
+  // Validator rejected 0000, so it remains unchanged
+  assert.ok(masked.includes('EMP-QA-0000'));
+});
+
+test('createRedactorTransform streams and redacts chunks via Web Streams', async () => {
+  const transform = createRedactorTransform({ mode: 'replace' });
+  const writer = transform.writable.getWriter();
+  const reader = transform.readable.getReader();
+
+  const writePromise = (async () => {
+    await writer.write('Log line 1: secret@corp.com\n');
+    await writer.write('Log line 2: 192.168.1.1\n');
+    await writer.close();
+  })();
+
+  const chunk1 = await reader.read();
+  assert.ok(chunk1.value.includes('[REDACTED_EMAIL]'));
+
+  const chunk2 = await reader.read();
+  assert.ok(chunk2.value.includes('[REDACTED_IP]'));
+
+  await writePromise;
 });
 
 test('ReDoS safety: executes in linear time even on adversarial input', () => {

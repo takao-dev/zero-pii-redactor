@@ -1,12 +1,12 @@
 /**
- * zero-pii-redactor: ReDoS-free, high-speed PII redactor, tokenizer, and pseudonymizer.
+ * zero-pii-redactor: ReDoS-free, high-speed PII redactor, tokenizer, auditor, and pseudonymizer.
  * Built with native WebCrypto. Zero Runtime Dependencies.
  */
 
 export * from './luhn.js';
 export * from './patterns.js';
 
-import { scanPii, RedactMode } from './patterns.js';
+import { scanPii, RedactMode, CustomDetector, PiiMatch } from './patterns.js';
 
 export interface RedactOptions {
   /** Redaction mode: 'mask' (partial obfuscation) or 'replace' (tag tokens). Defaults to 'mask'. */
@@ -15,6 +15,17 @@ export interface RedactOptions {
   sensitiveKeys?: string[];
   /** Custom salt for pseudonymization. */
   salt?: string;
+  /** Custom detectors for proprietary tokens, IDs, or patterns. */
+  customDetectors?: CustomDetector[];
+}
+
+export interface PiiAuditReport {
+  total: number;
+  riskLevel: 'none' | 'low' | 'medium' | 'high' | 'critical';
+  counts: Record<string, number>;
+  types: string[];
+  hasCredentials: boolean;
+  hasFinancials: boolean;
 }
 
 const DEFAULT_SENSITIVE_KEYS = new Set([
@@ -36,6 +47,7 @@ const DEFAULT_SENSITIVE_KEYS = new Set([
   'cvv',
   'cvc',
   'ssn',
+  'mynumber',
 ]);
 
 /**
@@ -47,7 +59,7 @@ export function redactText(text: string, options: RedactOptions = {}): string {
   }
 
   const mode = options.mode ?? 'mask';
-  const matches = scanPii(text, mode);
+  const matches = scanPii(text, mode, options.customDetectors);
 
   let result = text;
   for (const match of matches) {
@@ -88,6 +100,66 @@ export function redact<T = any>(input: T, options: RedactOptions = {}): T {
   }
 
   return result as T;
+}
+
+/**
+ * Audit and evaluate the privacy risk level of text or structured data without masking.
+ */
+export function auditPii(input: any, customDetectors: CustomDetector[] = []): PiiAuditReport {
+  let text = '';
+  if (typeof input === 'string') {
+    text = input;
+  } else {
+    try {
+      text = JSON.stringify(input);
+    } catch {
+      text = String(input);
+    }
+  }
+
+  const matches = scanPii(text, 'mask', customDetectors);
+  const counts: Record<string, number> = {};
+
+  for (const m of matches) {
+    counts[m.type] = (counts[m.type] || 0) + 1;
+  }
+
+  const total = matches.length;
+  const types = Object.keys(counts);
+
+  const hasCredentials = Boolean(counts.jwt || counts.aws_key || counts.github_token || counts.slack_token);
+  const hasFinancials = Boolean(counts.credit_card || counts.mynumber);
+
+  let riskLevel: PiiAuditReport['riskLevel'] = 'none';
+  if (hasCredentials || counts.credit_card || counts.mynumber) {
+    riskLevel = 'critical';
+  } else if (counts.email || counts.phone) {
+    riskLevel = 'high';
+  } else if (counts.ipv4 || counts.ipv6 || counts.postal) {
+    riskLevel = 'medium';
+  } else if (total > 0) {
+    riskLevel = 'low';
+  }
+
+  return {
+    total,
+    riskLevel,
+    counts,
+    types,
+    hasCredentials,
+    hasFinancials,
+  };
+}
+
+/**
+ * Create a Web Streams TransformStream for real-time streaming redaction.
+ */
+export function createRedactorTransform(options: RedactOptions = {}): TransformStream<string, string> {
+  return new TransformStream<string, string>({
+    transform(chunk, controller) {
+      controller.enqueue(redactText(chunk, options));
+    },
+  });
 }
 
 /**
