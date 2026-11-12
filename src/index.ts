@@ -6,7 +6,7 @@
 export * from './luhn.js';
 export * from './patterns.js';
 
-import { scanPii, RedactMode, CustomDetector, PiiMatch } from './patterns.js';
+import { scanPii, RedactMode, CustomDetector } from './patterns.js';
 
 export interface RedactOptions {
   /** Redaction mode: 'mask' (partial obfuscation) or 'replace' (tag tokens). Defaults to 'mask'. */
@@ -162,13 +162,30 @@ export function createRedactorTransform(options: RedactOptions = {}): TransformS
   });
 }
 
+function getWebCrypto(): Crypto {
+  if (typeof globalThis.crypto !== 'undefined' && globalThis.crypto.subtle) {
+    return globalThis.crypto;
+  }
+  try {
+    const g = globalThis as any;
+    const nodeCrypto = g.crypto || (typeof g.process !== 'undefined' && g.process?.versions?.node ? (eval('require')('node:crypto') as any).webcrypto : undefined);
+    if (nodeCrypto?.subtle) {
+      return nodeCrypto as Crypto;
+    }
+  } catch {
+    // ignore
+  }
+  throw new Error('WebCrypto SubtleCrypto is not available in this environment');
+}
+
 /**
  * Pseudonymize an identifier with salted SHA-256 (one-way deterministic token).
  */
 export async function pseudonymize(value: string, salt: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(`${salt}:${value}`);
-  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', data);
+  const crypto = getWebCrypto();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   const hex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
   return `pii_hash:${hex.slice(0, 16)}`;
@@ -178,9 +195,10 @@ export async function pseudonymize(value: string, salt: string): Promise<string>
  * Securely tokenize sensitive text with reversible AES-256-GCM encryption.
  */
 export async function tokenize(secret: string, plaintext: string): Promise<string> {
+  const crypto = getWebCrypto();
   const encoder = new TextEncoder();
   const rawKey = encoder.encode(secret.padEnd(32, '0').slice(0, 32));
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
+  const cryptoKey = await crypto.subtle.importKey(
     'raw',
     rawKey as unknown as BufferSource,
     { name: 'AES-GCM' },
@@ -188,8 +206,8 @@ export async function tokenize(secret: string, plaintext: string): Promise<strin
     ['encrypt']
   );
 
-  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await globalThis.crypto.subtle.encrypt(
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: iv as unknown as BufferSource },
     cryptoKey,
     encoder.encode(plaintext) as unknown as BufferSource
@@ -218,9 +236,10 @@ export async function detokenize(secret: string, token: string): Promise<string>
   const iv = new Uint8Array(ivHex.match(/.{1,2}/g)!.map((byte) => parseInt(byte, 16)));
   const ciphertext = new Uint8Array(cipherHex.match(/.{1,2}/g)!.map((byte) => parseInt(byte, 16)));
 
+  const crypto = getWebCrypto();
   const encoder = new TextEncoder();
   const rawKey = encoder.encode(secret.padEnd(32, '0').slice(0, 32));
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
+  const cryptoKey = await crypto.subtle.importKey(
     'raw',
     rawKey as unknown as BufferSource,
     { name: 'AES-GCM' },
@@ -228,7 +247,7 @@ export async function detokenize(secret: string, token: string): Promise<string>
     ['decrypt']
   );
 
-  const decrypted = await globalThis.crypto.subtle.decrypt(
+  const decrypted = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: iv as unknown as BufferSource },
     cryptoKey,
     ciphertext as unknown as BufferSource
