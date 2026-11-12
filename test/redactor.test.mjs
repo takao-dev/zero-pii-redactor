@@ -8,6 +8,7 @@ if (!globalThis.crypto || !globalThis.crypto.subtle) {
 
 import {
   redactText,
+  redact,
   auditPii,
   createRedactorTransform,
   isValidLuhn,
@@ -141,4 +142,112 @@ test('tokenize and detokenize reversibly encrypts sensitive plaintext', async ()
 
   const restored = await detokenize(secret, token);
   assert.equal(restored, sensitive);
+});
+
+test('Luhn and MyNumber checksum validator boundary conditions', () => {
+  // Luhn length boundaries
+  assert.equal(isValidLuhn('123456789012'), false); // 12 digits (too short)
+  assert.equal(isValidLuhn('12345678901234567890'), false); // 20 digits (too long)
+
+  // MyNumber length and character boundaries
+  assert.equal(isValidMyNumber('12345678901'), false); // 11 digits
+  assert.equal(isValidMyNumber('1234567890123'), false); // 13 digits
+  assert.equal(isValidMyNumber(''), false);
+});
+
+test('redact recursively scrubs nested objects, arrays, and sensitive keys', () => {
+  const payload = {
+    user: 'Alice',
+    password: 'super-secret-password-123',
+    apiKey: 'sk-1234567890abcdef',
+    details: {
+      email: 'alice@example.com',
+      notes: 'Call me at 090-1234-5678',
+      tokens: ['ghp_123456789012345678901234567890123456', 42, null, true],
+    },
+    nonString: 100,
+  };
+
+  const masked = redact(payload);
+  assert.equal(masked.password, '********');
+  assert.equal(masked.apiKey, '********');
+  assert.ok(!masked.details.email.includes('alice@example.com'));
+  assert.ok(masked.details.notes.includes('***-****-5678'));
+  assert.equal(masked.nonString, 100);
+
+  // mode: replace with custom keys
+  const replaced = redact(payload, {
+    mode: 'replace',
+    sensitiveKeys: ['apiKey', 'customSecret'],
+  });
+  assert.equal(replaced.apiKey, '[REDACTED_APIKEY]');
+
+  // Primitives and empty inputs
+  assert.equal(redact(null), null);
+  assert.equal(redact(123), 123);
+  assert.ok(redact('user@example.com').includes('@example.com'));
+  assert.ok(redact(['test@example.com'])[0].includes('@example.com'));
+});
+
+test('scanPii and redactText with replace mode, IPv6, and short tokens', () => {
+  // replace mode for different types
+  const text = 'IPv6: 2001:0db8:85a3:0000:0000:8a2e:0370:7334 Postal: 100-0001 Short: ghp_1234';
+  const replaced = redactText(text, { mode: 'replace' });
+  assert.ok(replaced.includes('[REDACTED_POSTAL]'));
+  assert.ok(replaced.includes('[REDACTED_IP]'));
+
+  // mask mode for IPv6
+  const masked = redactText('IP is 2001:0db8:85a3:0000:0000:8a2e:0370:7334');
+  assert.ok(masked.includes('****:****:****:****'));
+
+  // Custom detector with fallback replacement
+  const withCustom = redactText('ID: SECRET-999', {
+    mode: 'replace',
+    customDetectors: [
+      { type: 'secret_id', pattern: /SECRET-\d+/g },
+    ],
+  });
+  assert.ok(withCustom.includes('[REDACTED_SECRET_ID]'));
+
+  // Empty or non-string text
+  assert.equal(redactText(''), '');
+  assert.equal(redactText(null), null);
+});
+
+test('auditPii reports various risk levels: critical, high, medium, low, none', () => {
+  // None
+  const rNone = auditPii('Just a harmless log message.');
+  assert.equal(rNone.riskLevel, 'none');
+  assert.equal(rNone.total, 0);
+
+  // High (email or phone)
+  const rHigh = auditPii('Contact: user@domain.com');
+  assert.equal(rHigh.riskLevel, 'high');
+  assert.equal(rHigh.hasCredentials, false);
+  assert.equal(rHigh.hasFinancials, false);
+
+  // Medium (IP or postal only)
+  const rMed = auditPii('Request from 192.168.1.50 and zip 100-0001');
+  assert.equal(rMed.riskLevel, 'medium');
+
+  // Low (custom detector only)
+  const rLow = auditPii('Employee EMP-1234', [
+    { type: 'emp_id', pattern: /EMP-\d+/g },
+  ]);
+  assert.equal(rLow.riskLevel, 'low');
+
+  // Non-string input to auditPii
+  const rObj = auditPii({ ip: '10.0.0.1' });
+  assert.equal(rObj.riskLevel, 'medium');
+
+  // Circular or unstringifiable object fallback
+  const circular = {};
+  circular.self = circular;
+  const rCirc = auditPii(circular);
+  assert.equal(rCirc.riskLevel, 'none');
+});
+
+test('detokenize error handling', async () => {
+  await assert.rejects(() => detokenize('secret', 'invalid_prefix'), /invalid token prefix/i);
+  await assert.rejects(() => detokenize('secret', 'pii_tok_onlyOnePart'), /malformed token structure/i);
 });
