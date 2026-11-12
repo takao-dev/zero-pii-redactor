@@ -1,6 +1,6 @@
 {
   "name": "zero-pii-redactor",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "High-speed, ReDoS-free PII redactor, tokenizer, and pseudonymizer for logs, AI prompts, and Edge. Zero runtime dependencies.",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -23,7 +23,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "pretest": "npm run build",
-    "test": "node --test test/*.test.mjs"
+    "pretest:coverage": "npm run build",
+    "test": "node --test test/*.test.mjs",
+    "prepack": "npm run build",
+    "test:coverage": "node -e \"require('node:fs').mkdirSync('coverage', {recursive: true})\" && node --test test/*.test.mjs --experimental-test-coverage --test-reporter=spec --test-reporter=lcov --test-reporter=junit --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info --test-reporter-destination=coverage/junit.xml"
   },
   "keywords": [
     "pii",
