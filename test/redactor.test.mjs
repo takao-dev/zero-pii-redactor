@@ -16,6 +16,7 @@ import {
   pseudonymize,
   tokenize,
   detokenize,
+  getWebCrypto,
 } from '../dist/index.js';
 
 test('Luhn validator verifies standard card numbers and rejects non-cards', () => {
@@ -250,4 +251,28 @@ test('auditPii reports various risk levels: critical, high, medium, low, none', 
 test('detokenize error handling', async () => {
   await assert.rejects(() => detokenize('secret', 'invalid_prefix'), /invalid token prefix/i);
   await assert.rejects(() => detokenize('secret', 'pii_tok_onlyOnePart'), /malformed token structure/i);
+});
+
+test('masks AWS access keys and Slack API tokens', () => {
+  const awsSample = 'AWS_KEY=AKIAIOSFODNN7EXAMPLE';
+  const maskedAws = redactText(awsSample, { mode: 'mask' });
+  assert.ok(!maskedAws.includes('AKIAIOSFODNN7EXAMPLE'));
+  assert.ok(maskedAws.includes('AKIA...MPLE'));
+
+  const slackSample = 'Token: xoxb-123456789012-abcdefghij';
+  const maskedSlack = redactText(slackSample, { mode: 'mask' });
+  assert.ok(!maskedSlack.includes('xoxb-123456789012-abcdefghij'));
+  assert.ok(maskedSlack.includes('xoxb...ghij'));
+});
+
+test('getWebCrypto throws when crypto is unavailable', () => {
+  const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  try {
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined });
+    assert.throws(() => getWebCrypto(), /WebCrypto SubtleCrypto is not available/i);
+  } finally {
+    if (originalCrypto) {
+      Object.defineProperty(globalThis, 'crypto', originalCrypto);
+    }
+  }
 });
