@@ -41,6 +41,14 @@
   ],
   "author": "takao-dev",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/takao-dev/zero-pii-redactor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/takao-dev/zero-pii-redactor/issues"
+  },
+  "homepage": "https://github.com/takao-dev/zero-pii-redactor#readme",
   "engines": {
     "node": ">=18.0.0"
   },

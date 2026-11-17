@@ -112,6 +112,35 @@ test('createRedactorTransform streams and redacts chunks via Web Streams', async
   await writePromise;
 });
 
+test('stream redaction is independent of input chunk boundaries', async () => {
+  const source = 'contact alice@example.com\r\n';
+  for (let split = 0; split <= source.length; split++) {
+    const transform = createRedactorTransform({ mode: 'replace' });
+    const writer = transform.writable.getWriter();
+    const reader = transform.readable.getReader();
+    const writing = (async () => {
+      await writer.write(source.slice(0, split));
+      await writer.write(source.slice(split));
+      await writer.close();
+    })();
+    let output = '';
+    while (true) { const item = await reader.read(); if (item.done) break; output += item.value; }
+    await writing;
+    assert.ok(!output.includes('alice@example.com'), `split at ${split} leaked the email`);
+    assert.ok(output.includes('[REDACTED_EMAIL]'));
+  }
+});
+
+test('stream redaction rejects an oversized incomplete record without releasing it', async () => {
+  const transform = createRedactorTransform({ mode: 'replace' });
+  const writer = transform.writable.getWriter();
+  const reader = transform.readable.getReader();
+  const write = writer.write(`secret=${'x'.repeat(65_537)}`);
+  const read = reader.read();
+  await assert.rejects(() => read);
+  await assert.rejects(() => write, /record exceeds 65536 characters/i);
+});
+
 test('ReDoS safety: executes in linear time even on adversarial input', () => {
   const evilString = 'a'.repeat(50_000) + '@' + 'b'.repeat(50_000);
   const start = performance.now();
@@ -131,6 +160,8 @@ test('pseudonymize generates consistent, one-way deterministic hashes', async ()
   assert.equal(id1, id2);
   assert.notEqual(id1, id3);
   assert.ok(id1.startsWith('pii_hash:'));
+  assert.equal(id1.length, 'pii_hash:'.length + 64);
+  assert.notEqual(await pseudonymize('user_9999', `${salt}:`), id1);
 });
 
 test('tokenize and detokenize reversibly encrypts sensitive plaintext', async () => {
@@ -143,6 +174,26 @@ test('tokenize and detokenize reversibly encrypts sensitive plaintext', async ()
 
   const restored = await detokenize(secret, token);
   assert.equal(restored, sensitive);
+});
+
+test('token v2 binds the full secret and strictly parses encrypted bytes', async () => {
+  const plaintext = 'refresh_token_value';
+  const keyA = `${'s'.repeat(32)}-first`;
+  const keyB = `${'s'.repeat(32)}-second`;
+  const token = await tokenize(keyA, plaintext);
+  await assert.rejects(() => detokenize(keyB, token));
+  assert.equal(await detokenize(keyA, token), plaintext);
+  await assert.rejects(() => detokenize(keyA, token.replace(/_([0-9a-f])/, '_z')), /malformed encrypted token/i);
+  await assert.rejects(() => tokenize('short', plaintext), /32 bytes/i);
+  await assert.rejects(() => tokenize(keyA, 'x'.repeat(1_048_577)), /no larger than 1 MiB/i);
+  await assert.rejects(() => detokenize(keyA, 'pii_tok_v2_' + 'a'.repeat(2_200_000)), /no larger than 2 MiB/i);
+});
+
+test('recursive redaction rejects excessive nesting', () => {
+  const root = {};
+  let current = root;
+  for (let i = 0; i < 130; i++) current = current.next = {};
+  assert.throws(() => redact(root), /depth exceeds/i);
 });
 
 test('Luhn and MyNumber checksum validator boundary conditions', () => {
@@ -190,6 +241,26 @@ test('redact recursively scrubs nested objects, arrays, and sensitive keys', () 
   assert.ok(redact(['test@example.com'])[0].includes('@example.com'));
 });
 
+test('redact normalizes custom keys and preserves prototype-shaped input as safe data', () => {
+  const input = JSON.parse('{"session_token":"secret-value","__proto__":{"isAdmin":true},"constructor":{"email":"alice@example.com"}}');
+  const result = redact(input, { sensitiveKeys: ['session_token'], mode: 'replace' });
+  assert.equal(result.session_token, '[REDACTED_SESSION_TOKEN]');
+  assert.equal(Object.getPrototypeOf(result), Object.prototype);
+  assert.equal(Object.hasOwn(result, '__proto__'), true);
+  assert.equal(result.__proto__.isAdmin, true);
+  assert.ok(!result.constructor.email.includes('alice@example.com'));
+  assert.equal({}.isAdmin, undefined);
+});
+
+test('custom detector regexes do not mutate caller state or hang on zero-width matches', () => {
+  const detector = /SECRET/;
+  detector.lastIndex = 3;
+  assert.equal(redactText('SECRET', { customDetectors: [{ type: 'secret', pattern: detector }] }), '********');
+  assert.equal(detector.lastIndex, 3);
+  assert.ok(redactText('abc', { customDetectors: [{ type: 'zero', pattern: /(?=.)/g }] }).length > 0);
+  assert.throws(() => redactText('abc', { mode: 'pseudonymize' }), /use pseudonymize/i);
+});
+
 test('scanPii and redactText with replace mode, IPv6, and short tokens', () => {
   // replace mode for different types
   const text = 'IPv6: 2001:0db8:85a3:0000:0000:8a2e:0370:7334 Postal: 100-0001 Short: ghp_1234';
@@ -213,6 +284,13 @@ test('scanPii and redactText with replace mode, IPv6, and short tokens', () => {
   // Empty or non-string text
   assert.equal(redactText(''), '');
   assert.equal(redactText(null), null);
+});
+
+test('redacts compressed IPv6 and Japanese two-digit area-code landlines', () => {
+  const output = redactText('IP ::1; Tokyo 03-1234-5678; Osaka 06-9876-5432', { mode: 'replace' });
+  assert.equal(output.includes('::1'), false);
+  assert.equal(output.includes('03-1234-5678'), false);
+  assert.equal(output.includes('06-9876-5432'), false);
 });
 
 test('auditPii reports various risk levels: critical, high, medium, low, none', () => {
