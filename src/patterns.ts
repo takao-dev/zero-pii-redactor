@@ -214,17 +214,9 @@ function scanRegex(text: string, regex: RegExp, onMatch: (val: string, start: nu
 }
 
 function isValidIPv6(value: string): boolean {
-  if (value.includes('%') || (value.match(/::/g) ?? []).length > 1) return false;
-  let address = value;
-  const ipv4 = address.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (ipv4) {
-    const octets = ipv4[1].split('.');
-    if (octets.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return false;
-    const [a, b, c, d] = octets.map(Number);
-    address = address.slice(0, -ipv4[1].length) + `${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
-  }
-  const compressed = address.includes('::');
-  const halves = compressed ? address.split('::') : [address];
+  if ((value.match(/::/g) ?? []).length > 1) return false;
+  const compressed = value.includes('::');
+  const halves = compressed ? value.split('::') : [value];
   const left = halves[0] ? halves[0].split(':') : [];
   const right = compressed && halves[1] ? halves[1].split(':') : [];
   const groups = [...left, ...right];

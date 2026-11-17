@@ -354,3 +354,32 @@ test('getWebCrypto throws when crypto is unavailable', () => {
     }
   }
 });
+
+test('additional boundary, validation, and overlapping custom detector paths', async () => {
+  await assert.rejects(() => pseudonymize(123, 's'.repeat(16)), /exceeds its size limit/);
+  await assert.rejects(() => pseudonymize('user', 'short'), /16-byte to 4-KiB salt/);
+  await assert.rejects(
+    () => detokenize('s'.repeat(32), 'pii_tok_v2_' + '00'.repeat(16) + '_' + '00'.repeat(12) + '_00'),
+    /Malformed encrypted token/
+  );
+  assert.throws(
+    () => redactText('hello', { customDetectors: [{ type: 'bad', pattern: 'not-a-regex' }] }),
+    /string type and RegExp pattern/
+  );
+
+  // Overlapping custom detectors in mask and replace modes (different types and same type)
+  assert.equal(
+    redactText('abcdefg', {
+      mode: 'mask',
+      customDetectors: [{ type: 'a', pattern: /abcde/ }, { type: 'b', pattern: /cdefg/ }],
+    }),
+    '********'
+  );
+  assert.equal(
+    redactText('abcdefg', {
+      mode: 'replace',
+      customDetectors: [{ type: 'a', pattern: /abcde/ }, { type: 'a', pattern: /cdefg/ }],
+    }),
+    '[REDACTED]'
+  );
+});
