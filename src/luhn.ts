@@ -1,6 +1,6 @@
 /**
  * Mathematical checksum validators for financial and identity numbers.
- * Zero-allocation and constant-time operations.
+ * JavaScript execution is not guaranteed to be constant-time.
  */
 
 /**

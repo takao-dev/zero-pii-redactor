@@ -22,7 +22,7 @@ High-speed PII (Personally Identifiable Information) redactor, tokenizer, and ps
 
 - **Bounded Built-in Scanning**: Built-in detectors use bounded patterns and reject input over 1 MiB. Custom detector regular expressions are caller-controlled code and must be trusted; JavaScript cannot interrupt a catastrophic custom expression.
 - **Luhn Algorithm Validation**: Verifies credit card numbers via Modulo-10 checksum to eliminate false positives on arbitrary sequences of digits.
-- **Deep JSON & Object Sanitization**: Recursively scrubs nested payloads, strings, and sensitive dictionary keys (`password`, `apiKey`, `secret`, `ssn`, etc.).
+- **Deep JSON & Object Sanitization**: Recursively scrubs nested payloads, strings, and sensitive dictionary keys (`password`, `apiKey`, `secret`, `ssn`, etc.). Passing `sensitiveKeys` replaces the built-in key list, so include every key that must remain protected.
 - **Multiple Redaction Modes**:
   - `'mask'`: Partial character masking (e.g., `a***e@corp.com`, `4***-****-****-0366`).
   - `'replace'`: Replaces matches with semantic tokens (`[REDACTED_EMAIL]`, `[REDACTED_CREDIT_CARD]`).

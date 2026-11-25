@@ -11,7 +11,7 @@ import { scanPii, RedactMode, CustomDetector } from './patterns.js';
 export interface RedactOptions {
   /** Redaction mode: 'mask' (partial obfuscation) or 'replace' (tag tokens). Defaults to 'mask'. */
   mode?: RedactMode;
-  /** Custom list of sensitive object key names to redact unconditionally. */
+  /** When provided, replaces the built-in sensitive-key list; include every key that must be redacted. */
   sensitiveKeys?: string[];
   /** Custom salt for pseudonymization. */
   salt?: string;
