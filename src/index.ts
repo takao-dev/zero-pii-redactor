@@ -32,6 +32,31 @@ const DEFAULT_SENSITIVE_KEYS = new Set([
   'password',
   'pass',
   'secret',
+  'client_secret',
+  'private_key',
+  'secret_key',
+  'signing_key',
+  'encryption_key',
+  'aws_secret_access_key',
+  'aws_access_key_id',
+  'aws_session_token',
+  'secret_access_key',
+  'token',
+  'jwt',
+  'oauth_token',
+  'csrf_token',
+  'password_hash',
+  'cookie',
+  'set_cookie',
+  'credential',
+  'credentials',
+  'client_token',
+  'auth_token',
+  'id_token',
+  'session_token',
+  'bearer_token',
+  'database_url',
+  'connection_string',
   'apikey',
   'api_key',
   'accesstoken',
@@ -44,11 +69,32 @@ const DEFAULT_SENSITIVE_KEYS = new Set([
   'credit_card',
   'cardnumber',
   'card_number',
+  'credit_card_number',
+  'account_number',
+  'bank_account',
+  'routing_number',
+  'iban',
+  'swift_bic',
+  'tax_id',
+  'national_id',
   'cvv',
   'cvc',
   'ssn',
   'mynumber',
 ]);
+const CREDENTIAL_SENSITIVE_KEYS = new Set([
+  'password', 'pass', 'secret', 'clientsecret', 'privatekey', 'secretkey', 'signingkey',
+  'encryptionkey', 'awssecretaccesskey', 'awsaccesskeyid', 'awssessiontoken', 'secretaccesskey',
+  'apikey', 'accesstoken', 'refreshtoken', 'token', 'jwt', 'oauthtoken', 'csrftoken', 'passwordhash',
+  'cookie', 'setcookie',
+  'credential', 'credentials', 'clienttoken', 'authtoken', 'idtoken', 'sessiontoken',
+  'bearertoken', 'authorization', 'auth', 'databaseurl', 'connectionstring',
+]);
+const FINANCIAL_SENSITIVE_KEYS = new Set([
+  'creditcard', 'cardnumber', 'creditcardnumber', 'accountnumber', 'bankaccount', 'routingnumber',
+  'iban', 'swiftbic', 'taxid', 'nationalid', 'cvv', 'cvc', 'ssn', 'mynumber',
+]);
+const normalizeSensitiveKey = (key: string) => key.toLowerCase().replace(/[-_]/g, '');
 const MAX_STRING_CHARS = 1_048_576;
 const MAX_OBJECT_DEPTH = 128;
 const MAX_OBJECT_NODES = 100_000;
@@ -78,10 +124,9 @@ export function redactText(text: string, options: RedactOptions = {}): string {
  * Protects both values and sensitive object keys.
  */
 export function redact<T = any>(input: T, options: RedactOptions = {}): T {
-  const normalize = (key: string) => key.toLowerCase().replace(/[-_]/g, '');
   const customKeys = options.sensitiveKeys
-    ? new Set(options.sensitiveKeys.map(normalize))
-    : new Set([...DEFAULT_SENSITIVE_KEYS].map(normalize));
+    ? new Set(options.sensitiveKeys.map(normalizeSensitiveKey))
+    : new Set([...DEFAULT_SENSITIVE_KEYS].map(normalizeSensitiveKey));
   const seen = new WeakMap<object, any>();
   let visitedNodes = 0;
   const visit = (value: any, depth = 0): any => {
@@ -106,7 +151,7 @@ export function redact<T = any>(input: T, options: RedactOptions = {}): T {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       if (++visitedNodes > MAX_OBJECT_NODES) throw new RangeError(`Redaction object exceeds ${MAX_OBJECT_NODES} values`);
       const nested = value[key];
-      const redacted = customKeys.has(normalize(key))
+      const redacted = customKeys.has(normalizeSensitiveKey(key))
         ? options.mode === 'replace' ? `[REDACTED_${key.toUpperCase()}]` : '********'
         : visit(nested, depth + 1);
       Object.defineProperty(result, key, { value: redacted, enumerable: true, configurable: true, writable: true });
@@ -120,32 +165,69 @@ export function redact<T = any>(input: T, options: RedactOptions = {}): T {
  * Audit and evaluate the privacy risk level of text or structured data without masking.
  */
 export function auditPii(input: any, customDetectors: CustomDetector[] = []): PiiAuditReport {
-  let text = '';
-  if (typeof input === 'string') {
-    text = input;
-  } else {
-    try {
-      text = JSON.stringify(input);
-    } catch {
-      text = String(input);
-    }
-  }
-
-  const matches = scanPii(text, 'mask', customDetectors);
   const countMap = new Map<string, number>();
+  let total = 0;
+  let scannedChars = 0;
+  const addText = (text: string) => {
+    scannedChars += text.length;
+    if (scannedChars > MAX_STRING_CHARS) throw new RangeError(`PII audit input exceeds ${MAX_STRING_CHARS} characters`);
+    for (const match of scanPii(text, 'mask', customDetectors)) {
+      countMap.set(match.type, (countMap.get(match.type) ?? 0) + 1);
+      total += 1;
+    }
+  };
 
-  for (const m of matches) {
-    countMap.set(m.type, (countMap.get(m.type) ?? 0) + 1);
+  if (typeof input === 'string') {
+    addText(input);
+  } else if (input !== null && typeof input === 'object') {
+    const seen = new WeakSet<object>();
+    const stack: Array<{ value: unknown; depth: number }> = [{ value: input, depth: 0 }];
+    let visitedNodes = 0;
+    while (stack.length) {
+      const current = stack.pop()!;
+      const value = current.value;
+      if (typeof value === 'string') {
+        addText(value);
+        continue;
+      }
+      if (value === null || typeof value !== 'object') continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      if (current.depth >= MAX_OBJECT_DEPTH) throw new RangeError(`PII audit object depth exceeds ${MAX_OBJECT_DEPTH}`);
+      if (++visitedNodes > MAX_OBJECT_NODES) throw new RangeError(`PII audit object exceeds ${MAX_OBJECT_NODES} values`);
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (++visitedNodes > MAX_OBJECT_NODES) throw new RangeError(`PII audit object exceeds ${MAX_OBJECT_NODES} values`);
+          stack.push({ value: item, depth: current.depth + 1 });
+        }
+        continue;
+      }
+
+      for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (++visitedNodes > MAX_OBJECT_NODES) throw new RangeError(`PII audit object exceeds ${MAX_OBJECT_NODES} values`);
+        addText(key);
+        const normalizedKey = normalizeSensitiveKey(key);
+        if (CREDENTIAL_SENSITIVE_KEYS.has(normalizedKey)) {
+          countMap.set('credential_field', (countMap.get('credential_field') ?? 0) + 1);
+          total += 1;
+        } else if (FINANCIAL_SENSITIVE_KEYS.has(normalizedKey)) {
+          countMap.set('financial_field', (countMap.get('financial_field') ?? 0) + 1);
+          total += 1;
+        }
+        stack.push({ value: (value as Record<string, unknown>)[key], depth: current.depth + 1 });
+      }
+    }
   }
 
   const counts: Record<string, number> = {};
   for (const [type, count] of countMap) Object.defineProperty(counts, type, { value: count, enumerable: true, configurable: true, writable: true });
 
-  const total = matches.length;
   const types = Object.keys(counts);
 
-  const hasCredentials = Boolean(counts.jwt || counts.aws_key || counts.github_token || counts.slack_token);
-  const hasFinancials = Boolean(counts.credit_card || counts.mynumber);
+  const hasCredentials = Boolean(counts.credential_field || counts.jwt || counts.aws_key || counts.github_token || counts.slack_token);
+  const hasFinancials = Boolean(counts.financial_field || counts.credit_card || counts.mynumber);
 
   let riskLevel: PiiAuditReport['riskLevel'] = 'none';
   if (hasCredentials || counts.credit_card || counts.mynumber) {

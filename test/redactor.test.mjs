@@ -71,6 +71,11 @@ test('auditPii evaluates privacy risk score and categorizes sensitive data', () 
   assert.ok(report.counts.jwt >= 1);
   assert.ok(report.counts.credit_card >= 1);
   assert.ok(report.counts.email >= 1);
+
+  const opaqueCredentials = auditPii({ password: 'not-a-recognizable-token', client_secret: 'opaque-secret', nested: { privateKey: 'opaque-key' } });
+  assert.equal(opaqueCredentials.riskLevel, 'critical');
+  assert.equal(opaqueCredentials.hasCredentials, true);
+  assert.equal(opaqueCredentials.counts.credential_field, 3);
 });
 
 test('Custom detectors support proprietary company formats with validators', () => {
@@ -241,6 +246,23 @@ test('redact recursively scrubs nested objects, arrays, and sensitive keys', () 
   assert.ok(redact(['test@example.com'])[0].includes('@example.com'));
 });
 
+test('default object redaction masks common opaque credential keys', () => {
+  const output = redact({
+    client_secret: 'client-secret-value',
+    privateKey: 'private-key-value',
+    session_token: 'session-token-value',
+    jwt: 'opaque-jwt-value',
+    bank_account: 'opaque-account-value',
+    harmless: 'visible',
+  });
+  assert.equal(output.client_secret, '********');
+  assert.equal(output.privateKey, '********');
+  assert.equal(output.session_token, '********');
+  assert.equal(output.jwt, '********');
+  assert.equal(output.bank_account, '********');
+  assert.equal(output.harmless, 'visible');
+});
+
 test('redact normalizes custom keys and preserves prototype-shaped input as safe data', () => {
   const input = JSON.parse('{"session_token":"secret-value","__proto__":{"isAdmin":true},"constructor":{"email":"alice@example.com"}}');
   const result = redact(input, { sensitiveKeys: ['session_token'], mode: 'replace' });
@@ -319,11 +341,21 @@ test('auditPii reports various risk levels: critical, high, medium, low, none', 
   const rObj = auditPii({ ip: '10.0.0.1' });
   assert.equal(rObj.riskLevel, 'medium');
 
+  const rCredential = auditPii({ credentials: { password: 'opaque-value' } });
+  assert.equal(rCredential.riskLevel, 'critical');
+  assert.equal(rCredential.hasCredentials, true);
+
+  const rFinancialField = auditPii({ bankAccount: 'opaque-account-value' });
+  assert.equal(rFinancialField.hasFinancials, true);
+  assert.equal(rFinancialField.counts.financial_field, 1);
+
   // Circular or unstringifiable object fallback
   const circular = {};
   circular.self = circular;
   const rCirc = auditPii(circular);
   assert.equal(rCirc.riskLevel, 'none');
+
+  assert.throws(() => auditPii({ oversized: 'x'.repeat(1_048_577) }), /PII audit input exceeds/);
 });
 
 test('detokenize error handling', async () => {
